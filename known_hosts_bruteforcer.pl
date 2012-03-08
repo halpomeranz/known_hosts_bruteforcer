@@ -2,7 +2,7 @@
 #
 # SSH known_hosts file bruteforcer
 #
-# v1.2 - Xavier Mertens <xavier(at)rootshell(dot)be>
+# v1.4 - Xavier Mertens <xavier(at)rootshell(dot)be>
 #
 # This Perl script read a SSH known_host file containing hashed hosts and try to find hostnames
 # or IP addresses
@@ -11,6 +11,7 @@
 # 20101116 : v1.1 added support for IP range - Pawe³ Ró¿añski <rozie(at)poczta(dot)onet(dot)pl>
 # 20101228 : v1.2 change to NetAddr::IP, needs less memory, IPv6 ready - Pawe³ Ró¿añski <rozie(at)poczta(dot)onet(dot)pl>
 # 20110114 : v1.3 added support for IPv6 - Pawe³ Ró¿añski <rozie(at)poczta(dot)onet(dot)pl>
+# 20120307 : v1.4 added "Dictionary" mode - Hal Pomeranz <hal(at)deer(dash)run(dot)com>
 #
 # Todo
 # ----
@@ -30,7 +31,7 @@ $MAXIP  = 4294967296; # 2^32            # The whole IPv4 space
 $idx       = 0;
 
 # Process the arguments
-getopts("d:f:l:s:r:ivh", \%options);
+getopts("d:D:f:l:s:r:ivh", \%options);
 
 # Some help is sometimes useful
 if ($options{h}) {
@@ -38,6 +39,7 @@ if ($options{h}) {
 Usage: known_hosts_bruteforcer.pl [options]
 
   -d <domain>   Specify a domain name to append to hostnames (default: none)
+  -D <file>     Specify dictionary of words to use (instead of bruteforce)
   -f <file>     Specify the known_hosts file to bruteforce (default: $HOME/.ssh/known_hosts)
   -i            Bruteforce IP addresses (default: hostnames)
   -l <integer>  Specify the hostname maximum length (default: 8)
@@ -96,6 +98,20 @@ close(HOSTFILE);
 # ---------
 # Main Loop
 # ---------
+
+if (defined($options{'D'})) {
+    open(INP, "< $options{'D'}") || 
+        die "Unable to read dictionary file $options{'D'}: $!\n";
+    while (<INP>) {
+        chomp;
+        if ($line = searchHash($_)) {
+            printf("*** Found host: %s (line %d) ***\n", $_, $line + 1);
+        }
+    }
+    close(INP);
+    exit();
+}
+
 
 $loops=0;
 # This block will be executed only for IP range check
