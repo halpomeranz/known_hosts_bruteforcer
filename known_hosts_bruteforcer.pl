@@ -216,32 +216,16 @@ if ($ipMode || $ipRange) {
         $pool->shutdown;
 
         ($verbose) && print STDERR "Whole range checked.\n";
+        exit(0);
 }
 
-exit(0);
+
+# This part only handles testing hostnames one at a time
+# The code is messier and needs rewriting to become threaded.
 while(1) {
         my $initialIP = undef;
         my $tmpHost = undef;
-        if ($ipMode) {
-                
-                # Generate an IP address using the main loop counter
-                # Don't go beyond the IPv4 scope (2^32 addresses)
-                if ($loops > $MAXIP) {
-                        print "Done.\n";
-                        exit 0;
-                }
-
-                # If we have an initial IP, check the syntax and use it
-                if ($initialStr ne "") {
-                        my $ip = new Net::IP($initialStr);
-                        $initialIP = $ip->intip();
-                }
-                else {
-                        $initialIP = 0;
-                }
-                $tmpHost = sprintf("%vd", pack("N", $loops + $initialIP));
-        }
-        else {
+        if (!$ipMode) {
                 # Generate a temporary hostname (starting with an initial value if provided)
                 $tmpHost = generateHostname($initialStr);
                 if (length($tmpHost) > $passwordLen) {
