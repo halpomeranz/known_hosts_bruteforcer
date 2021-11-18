@@ -12,6 +12,7 @@
 # 20101228 : v1.2 change to NetAddr::IP, needs less memory, IPv6 ready - Pawe� R�a�ski <rozie(at)poczta(dot)onet(dot)pl>
 # 20110114 : v1.3 added support for IPv6 - Pawe� R�a�ski <rozie(at)poczta(dot)onet(dot)pl>
 # 20120307 : v1.4 added "Dictionary" mode - Hal Pomeranz <hal(at)deer(dash)run(dot)com>
+# 20211117 : v1.5 added thread support - Adrian Popa <adrian.popa.gh(do-these-things-still-work?)gmail.com>
 #
 # Todo
 # ----
@@ -24,6 +25,11 @@ use Getopt::Std;
 use Digest::HMAC_SHA1;
 use MIME::Base64;
 use NetAddr::IP qw(:lower);
+use Net::IP;
+use threads;
+use Thread::Pool;  # libthread-pool-perl on Debian/Ubuntu
+use Math::BigInt;
+use Data::Dumper;
 
 my $MAXLEN = 8;                            # Maximum hostnames length to check
 my $MAXIP  = 4294967296; # 2^32            # The whole IPv4 space
@@ -37,7 +43,7 @@ my $currentPwd = undef;
 sub searchHash($);
 
 # Process the arguments
-getopts("d:D:f:l:s:r:ivh", \%options);
+getopts("d:D:f:l:s:t:r:ivh", \%options);
 
 # Some help is sometimes useful
 if ($options{h}) {
@@ -49,8 +55,9 @@ Usage: known_hosts_bruteforcer.pl [options]
   -f <file>     Specify the known_hosts file to bruteforce (default: \$HOME/.ssh/known_hosts)
   -i            Bruteforce IP addresses (default: hostnames)
   -l <integer>  Specify the hostname maximum length (default: 8)
-  -s <string>   Specify an initial IP address or password (default: none)
+  -s <string>   Specify an initial hostname (default: none)
   -r <IP/mask>  Specify IP range to be checked
+  -t <integer>  Specify how many threads to use (default: 2)
   -v            Verbose output
   -h            Print this help, then exit
 EOF
@@ -83,10 +90,13 @@ my $ipMode = ($options{i}) ? 1 : 0;
 # IP range mode
 my $ipRange = $options{r};
 
+# Threads
+my $maxThreads = $options{t} || "2";
+
 # Starting IP or password?
 # To increase the speed of run the script across multiple computers,
-# an initial hostname or IP address can be given
-my $initialStr = $options{s};
+# an initial hostname can be given
+my $initialStr = $options{s} || "";
 
 # First read the known_hosts file and populate the lists
 # Only hashed hosts are processed
@@ -101,6 +111,7 @@ while(<HOSTFILE>) {
         }
 }
 close(HOSTFILE);
+($verbose) && print STDERR "Loaded $idx hashes\n";
 
 # ---------
 # Main Loop
@@ -122,45 +133,92 @@ if (defined($options{'D'})) {
 
 my $loops=0;
 # This block will be executed only for IP range check
-if ($ipRange){
-        print "Running IP range mode\n";
-	my $block = new NetAddr::IP ($ipRange);
-	my $count=$block->num();
-	my $ver=$block->version();
+#if ($ipRange){
+#        print "Running IP range mode\n";
+#        
+#	searchIPRange($ipRange);
+#        # Inform that all was checked and finish program
+#        print "Whole range checked.\n";
+#        exit 0;
+#}
 
-	if ($ver == 4){
-		print "IPv4 detected on input\n";
-		for ($loops=0;$loops<$count;$loops++){
-			my $tmpHost=$block->nth($loops);
-                	my $addr=new NetAddr::IP ($tmpHost);
-	                $tmpHost=($addr->addr);
-			if (my $line = searchHash($tmpHost)) {
-				printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
-			}
-			($verbose) && (($loops % 1000) == 0) && print STDERR "Testing: $tmpHost ($loops probes) ...\n";
-	        }
-	}
-	elsif ($ver == 6){
-		print "IPv6 detected on input\n";
-		for ($loops=0;$loops<$count;$loops++){
-                        my $tmpHost=$block->nth($loops);
-                        my $addr=new NetAddr::IP ($tmpHost);
-                        $tmpHost=($addr->addr);
-			my $tmpHostShort=($addr->short);
-                        if (my $line = searchHash($tmpHost)) {
-                                printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
-                        }
-                        if (my $line = searchHash($tmpHostShort)) {
-                                printf("*** Found host: %s (line %d) ***\n", $tmpHostShort, $line + 1);
-                        }
-                        ($verbose) && (($loops % 1000) == 0) && print STDERR "Testing: $tmpHost && $tmpHostShort ($loops probes) ...\n";
+
+if ($ipMode || $ipRange) {
+
+        my $prefix = $ipRange || "0.0.0.0/0";
+        # if the IP range is too big (>20 for IPv4, > 110 for IPv6)
+        # split it into smaller ranges, and run threaded
+        my $ipPrefix = new NetAddr::IP($prefix);
+        my $prefixSize = $ipPrefix->masklen();
+        my $ipVersion = $ipPrefix->version();
+        #($verbose) && print STDERR "Parsed prefixSize $prefixSize and version $ipVersion\n";
+        my $splitSize = 20;
+        $splitSize = 110 if ($ipVersion == 6);
+        my @prefixes = ();
+        if( $prefixSize < $splitSize ){
+                # split the original prefix into lots of $splitSize
+                # warning - for IPv6, this migth consume lots of memory
+
+                my $totalAddressSpaceSize = $ipPrefix->num() + 2; #the module ignores network/broadcast
+                my $firstPrefixStr = $ipPrefix->network()->addr()."/".$splitSize;
+                ($verbose) && print STDERR "Splitting $prefix into subnets of size $splitSize\n";
+                #($verbose) && print STDERR "First prefix is $firstPrefixStr\n";
+                my $firstPrefix = new NetAddr::IP($firstPrefixStr);
+                my $currentIP = $ipPrefix->bigint();
+                my $lastAddressSpaceIP = $currentIP + $totalAddressSpaceSize;
+                my $subnetSize = $firstPrefix->num() + 2 ; #the module ignores network/broadcast
+                ($verbose) && print STDERR "Split $totalAddressSpaceSize into chunks of $subnetSize IPs (".int($totalAddressSpaceSize/$subnetSize)." subnets). This is single-threaded and may hog the CPU.\n";
+
+                my $lastPrefix = $firstPrefix;
+                push @prefixes, $firstPrefix->cidr();
+                my $startTime = time;
+                while($currentIP + $subnetSize < $lastAddressSpaceIP){
+                        #print STDERR "lastPrefix: $lastPrefix, subnetSize $subnetSize, as number:".$lastPrefix->bigint()."\n";
+                        #since Net::IP can't take an integer + mask in the constructor, we need an intermediary object
+                        my $temp = new NetAddr::IP($lastPrefix->bigint() + $subnetSize);
+                        $lastPrefix =  new NetAddr::IP($temp->network()->addr()."/".$splitSize );
+                        push @prefixes, $lastPrefix->cidr();
+                        $currentIP += $subnetSize; #move to next subnet
                 }
-	}
-        # Inform that all was checked and finish program
-        print "Whole range checked.\n";
-        exit 0;
+                my $endTime = time;
+                ($verbose) && print STDERR "Created array of ".scalar(@prefixes)." subnets. Took ".($endTime - $startTime)." seconds\n";
+                #($verbose) && print STDERR Dumper(\@prefixes);
+        }
+        else{
+                # small enough to go solo
+                push @prefixes, $ipPrefix->cidr();
+        }
+
+        # now we can start the threads and process @prefixes
+        ($verbose) && print STDERR "Starting threaded execution $maxThreads threads\n";
+        my $pool = Thread::Pool->new({
+                optimize => 'cpu', # default: 'memory'        
+                do => 'searchIPRange',
+                monitor => sub { print STDERR "[Pool] monitor with @_\n"},
+                pre_post_monitor_only => 0, # default: 0 = also for "do"
+                
+                checkpoint => sub { print STDERR "[Pool] checkpointing\n" },
+                frequency => 1000,
+                
+                autoshutdown => 1, # default: 1 = yes
+                
+                workers => $maxThreads,     # default: 1
+                maxjobs => $maxThreads*5,     # default: 5 * workers
+                minjobs => $maxThreads*5/2,      # default: maxjobs / 2
+                
+        });
+        #load the pool with prefixes
+        #($verbose) && print STDERR "Maxworkers: ".$pool->workers()."\n";
+        foreach my $prefix (@prefixes){
+                ($verbose) && print STDERR "Queuing thread for $prefix\n";
+                $pool->job($prefix);
+        }
+        $pool->shutdown;
+
+        ($verbose) && print STDERR "Whole range checked.\n";
 }
 
+exit(0);
 while(1) {
         my $initialIP = undef;
         my $tmpHost = undef;
@@ -198,7 +256,7 @@ while(1) {
         }
 
         # In verbose mode, display a line every 1000 attempts
-        ($verbose) && (($loops % 1000) == 0) && print STDERR "Testing: $tmpHost ($loops probes) ...\n";
+        ($verbose) && (($loops % 1024) == 0) && print STDERR "Testing: $tmpHost ($loops probes) ...\n";
 
         if (my $line = searchHash($tmpHost)) {
                 printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
@@ -229,6 +287,61 @@ sub searchHash($) {
         }
         return 0;
 }
+
+#
+# Search for hashes in a specific IP range
+# This runs as a single thread
+#
+
+sub searchIPRange {
+        my $ipRange = shift;
+        my $block = new NetAddr::IP ($ipRange);
+	my $count=$block->num();
+	my $ver=$block->version();
+
+	if ($ver == 4){
+		#print "IPv4 detected on input\n";
+		for ($loops=0;$loops<$count;$loops++){
+			my $tmpHost=$block->nth($loops)->addr();
+                	#my $addr=new NetAddr::IP ($tmpHost);
+	                #$tmpHost=($addr->addr);
+			if (my $line = searchHash($tmpHost)) {
+				printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
+			}
+			($verbose) && (($loops % 1024) == 0) && print STDERR "Testing: $tmpHost ($loops probes) ...\n";
+	        }
+                #nth ignores network and broadcast IP. We process them here
+                foreach my $ip ($block->network()->addr(), $block->broadcast()->addr()){
+                        if (my $line = searchHash($ip)) {
+				printf("*** Found host: %s (line %d) ***\n", $ip, $line + 1);
+			}
+                }
+
+	}
+	elsif ($ver == 6){
+		#print "IPv6 detected on input\n";
+		for ($loops=0;$loops<$count;$loops++){
+                        my $tmpHost=$block->nth($loops);
+                        my $addr=new NetAddr::IP ($tmpHost);
+                        $tmpHost=($addr->addr);
+			my $tmpHostShort=($addr->short);
+                        if (my $line = searchHash($tmpHost)) {
+                                printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
+                        }
+                        if (my $line = searchHash($tmpHostShort)) {
+                                printf("*** Found host: %s (line %d) ***\n", $tmpHostShort, $line + 1);
+                        }
+                        ($verbose) && (($loops % 1000) == 0) && print STDERR "Testing: $tmpHost && $tmpHostShort ($loops probes) ...\n";
+                }
+                #nth ignores network and broadcast IP. We process them here
+                foreach my $ip ($block->network()->addr(), $block->broadcast()->addr()){
+                        if (my $line = searchHash($ip)) {
+				printf("*** Found host: %s (line %d) ***\n", $ip, $line + 1);
+			}
+                }
+	}
+}
+
 
 #
 # Generate a hostname based on a given set of allowed caracters
