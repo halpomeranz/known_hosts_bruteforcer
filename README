@@ -5,4 +5,58 @@
 This project is a SSH known_hosts file bruteforcer.
 For more information, visit: http://blog.rootshell.be/2010/11/03/bruteforcing-ssh-known_hosts-files/
 
+Usage:
+```
+Usage: known_hosts_bruteforcer.pl [options]
+
+  -d <domain>   Specify a domain name to append to hostnames (default: none)
+  -D <file>     Specify dictionary of words to use (instead of bruteforce)
+  -f <file>     Specify the known_hosts file to bruteforce (default: $HOME/.ssh/known_hosts)
+  -i            Bruteforce IP addresses (default: hostnames)
+  -l <integer>  Specify the hostname maximum length (default: 8)
+  -s <string>   Specify an initial hostname (default: none)
+  -r <IP/mask>  Specify IP range to be checked
+  -t <integer>  Specify how many threads to use (default: 2)
+  -v            Verbose output
+  -h            Print this help, then exit
+
+```
+To increase performance, the script splits IP subnets into /20 (for IPv4) and process them threaded.
+Search all IPs in 10.0.0.0/8 with 32 threads:
+```
+$ ./known_hosts_bruteforcer.pl -f known_hosts -i -v -t 32 -r 10.0.0.0/8
+Reading hashes from known_hosts ...
+Loaded 145 hashes
+Splitting 10.0.0.0/8 into subnets of size 20
+Split 16777216 into chunks of 4096 IPs (4096 subnets). This is single-threaded and may hog the CPU.
+Created array of 4096 subnets. Took 1 seconds
+Starting threaded execution 32 threads
+Queuing thread for 10.0.0.0/20
+Queuing thread for 10.0.16.0/20
+Queuing thread for 10.0.32.0/20
+Queuing thread for 10.0.48.0/20
+Queuing thread for 10.0.64.0/20
+Queuing thread for 10.0.80.0/20
+Queuing thread for 10.0.96.0/20
+Queuing thread for 10.0.112.0/20
+Queuing thread for 10.0.128.0/20
+Queuing thread for 10.0.144.0/20
+Testing: 10.0.64.1 (0 probes) ...
+Testing: 10.0.16.1 (0 probes) ...
+Testing: 10.0.0.1 (0 probes) ...
+Testing: 10.0.32.1 (0 probes) ...
+Testing: 10.0.80.1 (0 probes) ...
+Testing: 10.0.96.1 (0 probes) ...
+Testing: 10.0.128.1 (0 probes) ...
+Testing: 10.0.112.1 (0 probes) ...
+Testing: 10.0.144.1 (0 probes) ...
+Testing: 10.0.48.1 (0 probes) ...
+Queuing thread for 10.0.160.0/20
+Queuing thread for 10.0.176.0/20
+Queuing thread for 10.0.192.0/20
+*** Found host: 10.0.48.120 (line 86) ***
+...
+
+```
+
 Feel free to contribute to the script.
