@@ -20,7 +20,6 @@
 # - Consider cleaning up -i option - $MAXIP, $ipMode and so on - -r has all functions and IPv6 support.
 
 use strict;
-use warnings;
 use Getopt::Std;
 use Digest::HMAC_SHA1;
 use MIME::Base64;
@@ -34,22 +33,21 @@ use Data::Dumper;
 my $MAXLEN = 8;                            # Maximum hostnames length to check
 my $MAXIP  = 4294967296; # 2^32            # The whole IPv4 space
 
-my @saltStr   = ();
-my @base64Str = ();
-my $idx       = 0;
+my @Known_Hosts = ();
 my %options   = ();
 my $currentPwd = undef;
 
 sub searchHash($);
 
 # Process the arguments
-getopts("d:D:f:l:s:t:r:ivh", \%options);
+getopts("ad:D:f:l:s:t:r:ivh", \%options);
 
 # Some help is sometimes useful
 if ($options{h}) {
         print <<EOF;
 Usage: known_hosts_bruteforcer.pl [options]
 
+  -a            Return all matching lines (don't stop after first match)
   -d <domain>   Specify a domain name to append to hostnames (default: none)
   -D <file>     Specify dictionary of words to use (instead of bruteforce)
   -f <file>     Specify the known_hosts file to bruteforce (default: \$HOME/.ssh/known_hosts)
@@ -84,6 +82,9 @@ my $domainName = $options{d};
 # Verbose mode
 my $verbose = ($options{v}) ? 1 : 0;
 
+# Don't stop at first match
+my $keepMatching = ($options{a}) ? 1 : 0;
+
 # IP address mode
 my $ipMode = ($options{i}) ? 1 : 0;
 
@@ -102,16 +103,19 @@ my $initialStr = $options{s} || "";
 # Only hashed hosts are processed
 ($verbose) && print STDERR "Reading hashes from $knownhostFile ...\n";
 open(HOSTFILE, "$knownhostFile") || die "Cannot open $knownhostFile";
+
+my $cnt = 0;
 while(<HOSTFILE>) {
-        my ($hostHash, $keyType, $publicKey) = split(/ /);
-        my ($dummy, $one)  = ("", "");
-        if ($hostHash =~ m/\|1\|/) {
-                ($dummy, $one, $saltStr[$idx], $base64Str[$idx]) = split(/\|/, $hostHash);
-                $idx++;
-        }
+    $cnt += 1;
+    next unless (/^\|1\|/);
+
+    my ($hostHash, $keyType, $publicKey) = split(' ');
+    my ($dummy, $one, $salt, $hash) = split(/\|/, $hostHash);
+    push(@Known_Hosts, { 'line' => $cnt, 'salt' => $salt, 'hash' => $hash,
+			     'type' => $keyType, 'key' => $publicKey });
 }
 close(HOSTFILE);
-($verbose) && print STDERR "Loaded $idx hashes\n";
+($verbose) && print STDERR "Loaded ", scalar(@Known_Hosts), " hashes\n";
 
 # ---------
 # Main Loop
@@ -122,9 +126,7 @@ if (defined($options{'D'})) {
         die "Unable to read dictionary file $options{'D'}: $!\n";
     while (<INP>) {
         chomp;
-        if (my $line = searchHash($_)) {
-            printf("*** Found host: %s (line %d) ***\n", $_, $line + 1);
-        }
+	searchHash($_);
     }
     close(INP);
     exit();
@@ -242,9 +244,7 @@ while(1) {
         # In verbose mode, display a line every 1000 attempts
         ($verbose) && (($loops % 1024) == 0) && print STDERR "Testing: $tmpHost ($loops probes) ...\n";
 
-        if (my $line = searchHash($tmpHost)) {
-                printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
-        }
+	searchHash($tmpHost);
 
         $loops++;
 }
@@ -259,17 +259,20 @@ sub searchHash($) {
 
         # Process the list containing our hashes
         # For each one, generate a new hash and compare it
-        for (my $i = 0; $i < scalar(@saltStr); $i++) {
-                my $decoded = decode_base64($saltStr[$i]);
-                my $hmac = Digest::HMAC_SHA1->new($decoded);
-                $hmac->add($host);
-                my $digest = $hmac->b64digest;
-                $digest .= "="; # Quick fix ;-)
-                if ($digest eq $base64Str[$i]) {
-                        return $i;
-                }
+        for (my $i = 0; $i < scalar(@Known_Hosts); $i++) {
+	    my $ref = $Known_Hosts[$i];
+	    my $decoded = decode_base64($$ref{'salt'});
+	    my $hmac = Digest::HMAC_SHA1->new($decoded);
+	    $hmac->add($host);
+	    my $digest = $hmac->b64digest;
+	    $digest .= "="; # Quick fix ;-)
+	    if ($digest eq $$ref{'hash'}) {
+		print('"', join('","', $$ref{'line'}, $host,
+			               $$ref{'salt'}, $$ref{'hash'},
+				       $$ref{'type'}, $$ref{'key'}), "\"\n");
+		return unless ($keepMatching);
+	    }
         }
-        return 0;
 }
 
 #
@@ -289,16 +292,12 @@ sub searchIPRange {
 			my $tmpHost=$block->nth($loops)->addr();
                 	#my $addr=new NetAddr::IP ($tmpHost);
 	                #$tmpHost=($addr->addr);
-			if (my $line = searchHash($tmpHost)) {
-				printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
-			}
+			searchHash($tmpHost);
 			($verbose) && (($loops % 1024) == 0) && print STDERR "Testing: $tmpHost ($loops probes) ...\n";
 	        }
                 #nth ignores network and broadcast IP. We process them here
                 foreach my $ip ($block->network()->addr(), $block->broadcast()->addr()){
-                        if (my $line = searchHash($ip)) {
-				printf("*** Found host: %s (line %d) ***\n", $ip, $line + 1);
-			}
+		    searchHash($ip);
                 }
 
 	}
@@ -309,19 +308,13 @@ sub searchIPRange {
                         my $addr=new NetAddr::IP ($tmpHost);
                         $tmpHost=($addr->addr);
 			my $tmpHostShort=($addr->short);
-                        if (my $line = searchHash($tmpHost)) {
-                                printf("*** Found host: %s (line %d) ***\n", $tmpHost, $line + 1);
-                        }
-                        if (my $line = searchHash($tmpHostShort)) {
-                                printf("*** Found host: %s (line %d) ***\n", $tmpHostShort, $line + 1);
-                        }
+			searchHash($tmpHost);
+			searchHash($tmpHostShort);
                         ($verbose) && (($loops % 1000) == 0) && print STDERR "Testing: $tmpHost && $tmpHostShort ($loops probes) ...\n";
                 }
                 #nth ignores network and broadcast IP. We process them here
                 foreach my $ip ($block->network()->addr(), $block->broadcast()->addr()){
-                        if (my $line = searchHash($ip)) {
-				printf("*** Found host: %s (line %d) ***\n", $ip, $line + 1);
-			}
+		    searchHash($ip);
                 }
 	}
 }
